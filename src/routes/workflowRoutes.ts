@@ -9,7 +9,7 @@ import { WORKFLOW_STATUS, HTTP_STATUS } from '../constants';
 const router = Router();
 
 (router.get as any)('/:id/status', async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const { id } = req.params as { id: string };
 
     if (!validateUUID(id)) {
         logger.warn('Invalid UUID format', { workflowId: id });
@@ -47,7 +47,7 @@ const router = Router();
 });
 
 (router.get as any)('/:id/results', async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const { id } = req.params as { id: string };
 
     if (!validateUUID(id)) {
         logger.warn('Invalid UUID format', { workflowId: id });
