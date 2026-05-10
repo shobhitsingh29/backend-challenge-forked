@@ -1,4 +1,4 @@
-name: "example_workflow"
+name: "test_workflow_with_dependencies"
 steps:
   - taskType: "analysis"
     stepNumber: 1
@@ -6,6 +6,4 @@ steps:
     stepNumber: 2
   - taskType: "notification"
     stepNumber: 3
-  - taskType: "report"
-    stepNumber: 4
-    dependsOn: 2
+    dependsOn: 1

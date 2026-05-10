@@ -1,28 +1,78 @@
 import {AppDataSource} from '../data-source';
 import {Task} from '../models/Task';
 import {TaskRunner, TaskStatus} from './taskRunner';
+import { logger } from '../utils/Logger';
+import { TASK_POLLING_INTERVAL_MS, TASK_STATUS } from '../constants';
+import { In } from 'typeorm';
 
-export async function taskWorker() {
+export function taskWorker(): Promise<void> {
     const taskRepository = AppDataSource.getRepository(Task);
     const taskRunner = new TaskRunner(taskRepository);
 
-    while (true) {
-        const task = await taskRepository.findOne({
-            where: { status: TaskStatus.Queued },
-            relations: ['workflow'] // Ensure workflow is loaded
-        });
+    logger.info('Task worker started');
 
-        if (task) {
+    const startWorker = async () => {
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
             try {
-                await taskRunner.run(task);
+                const queuedTasks = await taskRepository.find({
+                    where: { status: TaskStatus.Queued },
+                    relations: ['workflow']
+                });
 
+                let taskToExecute: Task | null = null;
+
+                if (queuedTasks.length > 0) {
+                    const dependencyIds = queuedTasks
+                        .filter(t => t.dependsOnTaskId)
+                        .map(t => t.dependsOnTaskId!);
+
+                    const dependencyTasks = dependencyIds.length > 0
+                        ? await taskRepository.find({ where: { taskId: In(dependencyIds) } })
+                        : [];
+
+                    const dependencyMap = new Map(dependencyTasks.map(t => [t.taskId, t]));
+
+                    for (const task of queuedTasks) {
+                        if (task.dependsOnTaskId) {
+                            const dependencyTask = dependencyMap.get(task.dependsOnTaskId);
+                            if (!dependencyTask) {
+                                task.status = TaskStatus.Failed;
+                                task.progress = null;
+                                await taskRepository.save(task);
+                                logger.error('Task marked as failed - dependency task not found', { taskId: task.taskId, dependsOnTaskId: task.dependsOnTaskId });
+                            } else if (dependencyTask.status === TaskStatus.Failed) {
+                                task.status = TaskStatus.Failed;
+                                task.progress = null;
+                                await taskRepository.save(task);
+                                logger.info('Task marked as failed due to failed dependency', { taskId: task.taskId, dependsOnTaskId: task.dependsOnTaskId });
+                            } else if (dependencyTask.status === TaskStatus.Completed) {
+                                taskToExecute = task;
+                                break;
+                            }
+                        } else {
+                            taskToExecute = task;
+                            break;
+                        }
+                    }
+                }
+
+                if (taskToExecute) {
+                    try {
+                        logger.info('Executing task', { taskId: taskToExecute.taskId, taskType: taskToExecute.taskType });
+                        await taskRunner.run(taskToExecute);
+                    } catch (error) {
+                        logger.error('Task execution failed', error);
+                    }
+                }
+
+                await new Promise(resolve => setTimeout(resolve, TASK_POLLING_INTERVAL_MS));
             } catch (error) {
-                console.error('Task execution failed. Task status has already been updated by TaskRunner.');
-                console.error(error);
+                logger.error('Error in task worker loop', error);
+                await new Promise(resolve => setTimeout(resolve, TASK_POLLING_INTERVAL_MS));
             }
         }
+    };
 
-        // Wait before checking for the next task again
-        await new Promise(resolve => setTimeout(resolve, 5000));
-    }
+    return startWorker();
 }

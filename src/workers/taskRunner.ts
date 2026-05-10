@@ -1,9 +1,11 @@
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { Task } from '../models/Task';
 import { getJobForTaskType } from '../jobs/JobFactory';
 import {WorkflowStatus} from "../workflows/WorkflowFactory";
 import {Workflow} from "../models/Workflow";
 import {Result} from "../models/Result";
+import { logger } from '../utils/Logger';
+import { TASK_STATUS, WORKFLOW_STATUS } from '../constants';
 
 export enum TaskStatus {
     Queued = 'queued',
@@ -23,16 +25,18 @@ export class TaskRunner {
      * @throws If the job fails, it rethrows the error.
      */
     async run(task: Task): Promise<void> {
+        const taskLogger = logger.withContext({ taskId: task.taskId, jobType: task.taskType });
+
         task.status = TaskStatus.InProgress;
         task.progress = 'starting job...';
         await this.taskRepository.save(task);
         const job = getJobForTaskType(task.taskType);
 
         try {
-            console.log(`Starting job ${task.taskType} for task ${task.taskId}...`);
+            taskLogger.info('Starting job');
             const resultRepository = this.taskRepository.manager.getRepository(Result);
             const taskResult = await job.run(task);
-            console.log(`Job ${task.taskType} for task ${task.taskId} completed successfully.`);
+            taskLogger.info('Job completed successfully');
             const result = new Result();
             result.taskId = task.taskId!;
             result.data = JSON.stringify(taskResult || {});
@@ -43,7 +47,7 @@ export class TaskRunner {
             await this.taskRepository.save(task);
 
         } catch (error: any) {
-            console.error(`Error running job ${task.taskType} for task ${task.taskId}:`, error);
+            taskLogger.error('Error running job', error);
 
             task.status = TaskStatus.Failed;
             task.progress = null;
@@ -53,7 +57,17 @@ export class TaskRunner {
         }
 
         const workflowRepository = this.taskRepository.manager.getRepository(Workflow);
+        if (!task.workflow || !task.workflow.workflowId) {
+            taskLogger.error('Task has no associated workflow');
+            return;
+        }
+
         const currentWorkflow = await workflowRepository.findOne({ where: { workflowId: task.workflow.workflowId }, relations: ['tasks'] });
+
+        if (!currentWorkflow) {
+            taskLogger.error('Workflow not found for task completion', { workflowId: task.workflow.workflowId });
+            return;
+        }
 
         if (currentWorkflow) {
             const allCompleted = currentWorkflow.tasks.every(t => t.status === TaskStatus.Completed);
@@ -65,6 +79,48 @@ export class TaskRunner {
                 currentWorkflow.status = WorkflowStatus.Completed;
             } else {
                 currentWorkflow.status = WorkflowStatus.InProgress;
+            }
+
+            taskLogger.info('Updated workflow status', { workflowId: currentWorkflow.workflowId, status: currentWorkflow.status });
+
+            if (currentWorkflow.status === WorkflowStatus.Completed || currentWorkflow.status === WorkflowStatus.Failed) {
+                const resultRepository = this.taskRepository.manager.getRepository(Result);
+                const resultIds = currentWorkflow.tasks
+                    .filter(t => t.resultId)
+                    .map(t => t.resultId!);
+
+                const results = resultIds.length > 0
+                    ? await resultRepository.find({ where: { resultId: In(resultIds) } })
+                    : [];
+
+                const resultMap = new Map(results.map(r => [r.resultId, r]));
+                const taskResults: any[] = [];
+
+                for (const wfTask of currentWorkflow.tasks) {
+                    let output = null;
+                    if (wfTask.resultId) {
+                        const result = resultMap.get(wfTask.resultId);
+                        if (result) {
+                            output = JSON.parse(result.data || '{}');
+                        }
+                    }
+
+                    taskResults.push({
+                        taskId: wfTask.taskId,
+                        type: wfTask.taskType,
+                        status: wfTask.status,
+                        result: output
+                    });
+                }
+
+                const finalResult = {
+                    workflowId: currentWorkflow.workflowId,
+                    status: currentWorkflow.status,
+                    completedAt: new Date().toISOString(),
+                    tasks: taskResults
+                };
+
+                currentWorkflow.finalResult = JSON.stringify(finalResult);
             }
 
             await workflowRepository.save(currentWorkflow);
