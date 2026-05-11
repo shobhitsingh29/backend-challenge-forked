@@ -1,4 +1,4 @@
-# Backend Coding Challenge
+# Backend Coding Challenge.
 
 This repository demonstrates a backend architecture that handles asynchronous tasks, workflows, and job execution using TypeScript, Express.js, and TypeORM. The project showcases how to:
 
